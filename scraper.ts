@@ -13,7 +13,6 @@ import * as sqlite3 from "sqlite3";
 import * as urlparser from "url";
 import * as moment from "moment";
 import * as pdfjs from "pdfjs-dist";
-import didYouMean, * as didyoumean from "didyoumean2";
 
 sqlite3.verbose();
 
@@ -109,31 +108,6 @@ interface Cell extends Rectangle {
     elements: Element[]
 }
 
-// Gets the highest Y co-ordinate of all elements that are considered to be in the same row as
-// the specified element.  Take care to avoid extremely tall elements (because these may otherwise
-// be considered as part of all rows and effectively force the return value of this function to
-// the same value, regardless of the value of startElement).
-
-function getRowTop(elements: Element[], startElement: Element) {
-    let top = startElement.y;
-    for (let element of elements)
-        if (element.y < startElement.y + startElement.height && element.y + element.height > startElement.y)  // check for overlap
-            if (getVerticalOverlapPercentage(startElement, element) > 50)  // avoids extremely tall elements
-                if (element.y < top)
-                    top = element.y;
-    return top;
-}
-
-// Constructs a rectangle based on the union of the two specified rectangles.
-
-function union(rectangle1: Rectangle, rectangle2: Rectangle): Rectangle {
-    let x = Math.min(rectangle1.x, rectangle2.x);
-    let y = Math.min(rectangle1.y, rectangle1.y);
-    let width = Math.max(Math.max(rectangle1.x + rectangle1.width, rectangle2.x + rectangle2.width) - x, 0);
-    let height = Math.max(Math.max(rectangle1.y + rectangle1.height, rectangle2.y + rectangle2.height) - y, 0);
-    return { x: x, y: y, width: width, height: height };
-}
-
 // Constructs a rectangle based on the intersection of the two specified rectangles.
 
 function intersectRectangles(rectangle1: Rectangle, rectangle2: Rectangle): Rectangle {
@@ -190,258 +164,32 @@ function getPercentageOfElementInCell(element: Element, cell: Cell) {
     return (elementArea === 0) ? 0 : ((intersectionArea * 100) / elementArea);
 }
 
-// Calculates the fraction of an element that lies within a rectangle (as a percentage).  For
-// example, if a quarter of the specifed element lies within the specified rectangle then this
-// would return 25.
-
-function getPercentageOfElementInRectangle(element: Element, rectangle: Rectangle) {
-    let elementArea = getArea(element);
-    let intersectionArea = getArea(intersectRectangles(rectangle, element));
-    return (elementArea === 0) ? 0 : ((intersectionArea * 100) / elementArea);
-}
-
 // Calculates the area of a rectangle.
 
 function getArea(rectangle: Rectangle) {
     return rectangle.width * rectangle.height;
 }
 
-// Calculates the square of the Euclidean distance between two elements.
+// Gets the percentage of horizontal overlap between two rectangles (0 means no overlap and 100
+// means 100% overlap).
 
-function calculateDistance(element1: Element, element2: Element) {
-    let point1 = { x: element1.x + element1.width, y: element1.y + element1.height / 2 };
-    let point2 = { x: element2.x, y: element2.y + element2.height / 2 };
-    if (point2.x < point1.x - element1.width / 5)  // arbitrary overlap factor of 20% (ie. ignore elements that overlap too much in the horizontal direction)
-        return Number.MAX_VALUE;
-    return (point2.x - point1.x) * (point2.x - point1.x) + (point2.y - point1.y) * (point2.y - point1.y);
-}
+function getHorizontalOverlapPercentage(rectangle1: Rectangle, rectangle2: Rectangle) {
+    if (rectangle1 === undefined || rectangle2 === undefined)
+        return 0;
 
-// Determines whether there is vertical overlap between two elements.
+    let startX1 = rectangle1.x;
+    let endX1 = rectangle1.x + rectangle1.width;
 
-function isVerticalOverlap(element1: Element, element2: Element) {
-    return element2.y < element1.y + element1.height && element2.y + element2.height > element1.y;
-}
+    let startX2 = rectangle2.x;
+    let endX2 = rectangle2.x + rectangle2.width;
 
-// Gets the percentage of vertical overlap between two elements (0 means no overlap and 100 means
-// 100% overlap; and, for example, 20 means that 20% of the second element overlaps somewhere
-// with the first element).
+    if (startX1 >= endX2 || endX1 <= startX2 || rectangle1.width === 0 || rectangle2.width === 0)
+        return 0;
 
-function getVerticalOverlapPercentage(element1: Element, element2: Element) {
-    let y1 = Math.max(element1.y, element2.y);
-    let y2 = Math.min(element1.y + element1.height, element2.y + element2.height);
-    return (y2 < y1) ? 0 : (((y2 - y1) * 100) / element2.height);
-}
+    let intersectionWidth = Math.min(endX1, endX2) - Math.max(startX1, startX2);
+    let unionWidth = Math.max(endX1, endX2) - Math.min(startX1, startX2);
 
-// Gets the element immediately to the right of the specified element (but ignores elements that
-// appear after a large horizontal gap).
-
-function getRightElement(elements: Element[], element: Element) {
-    let closestElement: Element = { text: undefined, x: Number.MAX_VALUE, y: Number.MAX_VALUE, width: 0, height: 0 };
-    for (let rightElement of elements)
-        if (isVerticalOverlap(element, rightElement) &&  // ensure that there is at least some vertical overlap
-            getVerticalOverlapPercentage(element, rightElement) > 50 &&  // avoid extremely tall elements (ensure at least 50% overlap)
-            (rightElement.x > element.x + element.width - Tolerance) &&  // ensure the element actually is to the right (approximately)
-            (rightElement.x - (element.x + element.width) < 30) &&  // avoid elements that appear after a large gap (arbitrarily ensure less than a 30 pixel gap horizontally)
-            calculateDistance(element, rightElement) < calculateDistance(element, closestElement))  // check if closer than any element encountered so far
-            closestElement = rightElement;
-    return (closestElement.text === undefined) ? undefined : closestElement;
-}
-
-// Finds the elements that most closely match the specified text and returns a rectangle that
-// encompasses all of those elements.
-
-function findTextBounds(elements: Element[], text: string) {
-    // Examine all the elements on the page that being with the same character as the requested
-    // text.
-    
-    let condensedText = text.replace(/[\s,\-_]/g, "").toLowerCase();
-    let firstCharacter = condensedText.charAt(0);
-
-    let matches = [];
-    for (let element of elements.filter(element => element.text.trim().toLowerCase().startsWith(firstCharacter))) {
-        // Extract up to 5 elements to the right of the element that has text starting with the
-        // required character (and so may be the start of the requested text).  Join together the
-        // elements to the right in an attempt to find the best match to the text.
-
-        let rightElement = element;
-        let rightElements: Element[] = [];
-
-        do {
-            rightElements.push(rightElement);
-
-            let currentText = rightElements.map(element => element.text).join("").replace(/[\s,\-_]/g, "").toLowerCase();
-
-            if (currentText.length > condensedText.length + 2)  // stop once the text is too long
-                break;
-            if (currentText.length >= condensedText.length - 2) {  // ignore until the text is close to long enough
-                if (currentText === condensedText)
-                    matches.push({ elements: [...rightElements], threshold: 0, text: currentText });
-                else if (didYouMean(currentText, [ condensedText ], { caseSensitive: false, returnType: didyoumean.ReturnTypeEnums.FIRST_CLOSEST_MATCH, thresholdType: didyoumean.ThresholdTypeEnums.EDIT_DISTANCE, threshold: 1, trimSpaces: true }) !== null)
-                    matches.push({ elements: [...rightElements], threshold: 1, text: currentText });
-                else if (didYouMean(currentText, [ condensedText ], { caseSensitive: false, returnType: didyoumean.ReturnTypeEnums.FIRST_CLOSEST_MATCH, thresholdType: didyoumean.ThresholdTypeEnums.EDIT_DISTANCE, threshold: 2, trimSpaces: true }) !== null)
-                    matches.push({ elements: [...rightElements], threshold: 2, text: currentText });
-            }
-
-            rightElement = getRightElement(elements, rightElement);
-        } while (rightElement !== undefined && rightElements.length < 5);  // up to 5 elements
-    }
-
-    // Chose the best match (if any matches were found).  Note that trimming is performed here so
-    // that text such as "  Plan" is matched in preference to text such as "plan)" (when looking
-    // for elements that match "Plan").  For an example of this problem see "200/303/07" in
-    // "https://www.walkerville.sa.gov.au/webdata/resources/files/DA%20Register%20-%202007.pdf".
-    //
-    // Note that if the match is made of several elements then sometimes the caller requires the
-    // left most element and sometimes the right most element (depending on where further text
-    // will be searched for relative to this "found" element).
-
-    if (matches.length > 0) {
-        let bestMatch = matches.reduce((previous, current) =>
-            (previous === undefined ||
-            current.threshold < previous.threshold ||
-            (current.threshold === previous.threshold && Math.abs(current.text.trim().length - condensedText.length) < Math.abs(previous.text.trim().length - condensedText.length)) ? current : previous), undefined);
-
-        // Union together the rectangles of all elements belonging to the best match.
-
-        let rectangle = undefined;
-        for (let element of bestMatch.elements)
-            rectangle = (rectangle === undefined) ? element : union(rectangle, element);
-        return { x: rectangle.x, y: rectangle.y, width: rectangle.width, height: rectangle.height };
-    }
-
-    return undefined;
-}
-
-// Finds the start element of each development application on the current PDF page (there are
-// typically two development applications on a single page and each development application
-// typically begins with the text "APPLICATION NO:").
-
-function findStartElements(elements: Element[]) {
-    const FindText = "APPLICATIONNO:";
-    
-    // Examine all the elements on the page that begin with the same letter as the FindText.
-
-    let startElements: Element[] = [];
-    for (let element of elements.filter(element => element.text.trim().toLowerCase().startsWith(FindText.charAt(0).toLowerCase()))) {
-        // Extract up to 5 elements to the right of the element that has text starting with the
-        // first letter of the FindText (and so may be the start of the FindText).  Join together
-        // the elements to the right in an attempt to find the best match to the FindText.
-
-        let rightElement = element;
-        let rightElements: Element[] = [];
-        let matches = [];
-
-        do {
-            rightElements.push(rightElement);
-        
-            // Allow for common miscellaneous characters such as " ", "." and "-".
-
-            let text = rightElements.map(element => element.text).join("").replace(/[\s,\-_]/g, "").toLowerCase();
-            if (text.length > FindText.length + 2)  // stop once the text is too long
-                break;
-            if (text.length >= FindText.length - 2) {  // ignore until the text is close to long enough
-                if (text === FindText.toLowerCase())
-                    matches.push({ element: rightElement, threshold: 0, text: text });
-                else if (didYouMean(text, [ FindText ], { caseSensitive: false, returnType: didyoumean.ReturnTypeEnums.FIRST_CLOSEST_MATCH, thresholdType: didyoumean.ThresholdTypeEnums.EDIT_DISTANCE, threshold: 1, trimSpaces: true }) !== null)
-                    matches.push({ element: rightElement, threshold: 1, text: text });
-                else if (didYouMean(text, [ FindText ], { caseSensitive: false, returnType: didyoumean.ReturnTypeEnums.FIRST_CLOSEST_MATCH, thresholdType: didyoumean.ThresholdTypeEnums.EDIT_DISTANCE, threshold: 2, trimSpaces: true }) !== null)
-                    matches.push({ element: rightElement, threshold: 2, text: text });
-            }
-
-            rightElement = getRightElement(elements, rightElement);
-        } while (rightElement !== undefined && rightElements.length < 5);  // up to 5 elements
-
-        // Chose the best match (if any matches were found).
-
-        if (matches.length > 0) {
-            let bestMatch = matches.reduce((previous, current) =>
-                (previous === undefined ||
-                current.threshold < previous.threshold ||
-                (current.threshold === previous.threshold && Math.abs(current.text.trim().length - FindText.length) < Math.abs(previous.text.trim().length - FindText.length)) ? current : previous), undefined);
-            startElements.push(bestMatch.element);
-        }
-    }
-
-    // Ensure the start elements are sorted in the order that they appear on the page.
-
-    let yComparer = (a, b) => (a.y > b.y) ? 1 : ((a.y < b.y) ? -1 : 0);
-    startElements.sort(yComparer);
-    return startElements;
-}
-
-// Parses the details from the elements associated with a single development application.
-
-function parseApplicationElements(elements: Element[], cells: Cell[], informationUrl: string) {
-    let applicationNumberHeadingBounds = findTextBounds(elements, "APPLICATION NO:");
-    let descriptionHeadingCell = cells.find(cell => cell.elements.map(element => element.text).join("").replace(/\s/g, "").toUpperCase() === "DESCRIPTION:");
-    let dateLodgedHeadingCell = cells.find(cell => cell.elements.map(element => element.text).join("").replace(/\s/g, "").toUpperCase() === "DATELODGED:");
-    let developmentAddressHeadingCell = cells.find(cell => cell.elements.map(element => element.text).join("").replace(/\s/g, "").toUpperCase() === "DEVELOPMENTADDRESS:");
-
-    // Get the application number.
-
-    if (applicationNumberHeadingBounds === undefined) {
-        let elementSummary = elements.map(element => `[${element.text}]`).join("");
-        console.log(`Could not find the "APPLICATION NO:" heading on the PDF page for the current development application.  The development application will be ignored.  Elements: ${elementSummary}`);
-        return undefined;
-    }
-    let applicationNumberBounds = {
-        x: applicationNumberHeadingBounds.x + applicationNumberHeadingBounds.width,
-        y: applicationNumberHeadingBounds.y,
-        width: Number.MAX_VALUE,
-        height: applicationNumberHeadingBounds.height
-    };
-    let applicationNumber = elements.filter(element => getPercentageOfElementInRectangle(element, applicationNumberBounds) > 10).map(element => element.text).join("").replace(/\s/g, "").replace(/^:/, "");
-    if (applicationNumber === undefined || applicationNumber === "") {
-        let elementSummary = elements.map(element => `[${element.text}]`).join("");
-        console.log(`Could not find the application number on the PDF page for the current development application.  The development application will be ignored.  Elements: ${elementSummary}`);
-        return undefined;
-    }
-    console.log(`    Found \"${applicationNumber}\".`);
-
-    // Get the description.
-    
-    let description = "";
-    if (descriptionHeadingCell !== undefined) {
-        let descriptionCell = cells.find(cell => (descriptionHeadingCell.x + descriptionHeadingCell.width - cell.x) ** 2 + (descriptionHeadingCell.y - cell.y) ** 2 < Tolerance ** 2);
-        description = descriptionCell.elements.map(element => element.text).join("").trim().replace(/\s\s+/g, " ");
-    }
-
-    // Get the received date.
-    
-    let receivedDate: moment.Moment = moment.invalid();
-    if (dateLodgedHeadingCell !== undefined) {
-        let receivedDateCell = cells.find(cell => (dateLodgedHeadingCell.x + dateLodgedHeadingCell.width - cell.x) ** 2 + (dateLodgedHeadingCell.y - cell.y) ** 2 < Tolerance ** 2);
-        let receivedDateText = receivedDateCell.elements.map(element => element.text).join("").replace(/\s/g, "");
-        receivedDate = moment(receivedDateText, [ "D/M/YYYY", "D/M/YY" ], true);
-    }
-
-    // Get the address.
-
-    if (developmentAddressHeadingCell === undefined) {
-        let elementSummary = elements.map(element => `[${element.text}]`).join("");
-        console.log(`Could not find the "DEVELOPMENT ADDRESS:" heading on the PDF page for the current development application.  The development application will be ignored.  Elements: ${elementSummary}`);
-        return undefined;
-    }
-
-    let addressCell = cells.find(cell => (developmentAddressHeadingCell.x + developmentAddressHeadingCell.width - cell.x) ** 2 + (developmentAddressHeadingCell.y - cell.y) ** 2 < Tolerance ** 2);
-    let address = addressCell.elements.map(element => element.text).join("").trim().replace(/\s\s+/g, " ");
-    if (address === "") {
-        let elementSummary = elements.map(element => `[${element.text}]`).join("");
-        console.log(`The address is blank on the PDF page for the current development application.  The development application will be ignored.  Elements: ${elementSummary}`);
-        return undefined;
-    }
-
-    // Construct the resulting application information.
-       
-    return {
-        applicationNumber: applicationNumber,
-        address: address,
-        description: ((description !== undefined && description.trim() !== "") ? description : "NO DESCRIPTION PROVIDED"),
-        informationUrl: informationUrl,
-        commentUrl: CommentUrl,
-        scrapeDate: moment().format("YYYY-MM-DD"),
-        receivedDate: (receivedDate !== undefined && receivedDate.isValid()) ? receivedDate.format("YYYY-MM-DD") : ""
-    };
+    return (intersectionWidth * 100) / unionWidth;
 }
 
 // Examines all the lines in a page of a PDF and constructs cells (ie. rectangles) based on those
@@ -683,48 +431,120 @@ async function parsePdf(url: string) {
         // Allocate each element to an "owning" cell.
 
         for (let element of elements) {
-            let ownerCell = cells.find(cell => getPercentageOfElementInCell(element, cell) > 50);  // at least 50% of the element must be within the cell deemed to be the owner
+            let ownerCell = cells.find(cell => getPercentageOfElementInCell(element, cell) > 40);  // at least 40% of the element must be within the cell deemed to be the owner
             if (ownerCell !== undefined)
                 ownerCell.elements.push(element);
         }
 
-        // Group the elements and the cells into sections based on where the "APPLICATION NO:" text
-        // starts.
+        // Group the cells into rows.
 
-        let applicationElementGroups = [];
-        let startElements = findStartElements(elements);
-        for (let index = 0; index < startElements.length; index++) {
-            // Determine the highest Y co-ordinate of this row and the next row (or the bottom of
-            // the current page).  Allow some leeway vertically (add some extra height) because
-            // in some cases required elements might be higher up than the start element.
-            
-            let startElement = startElements[index];
-            let raisedStartElement: Element = {
-                text: startElement.text,
-                x: startElement.x,
-                y: startElement.y - startElement.height / 2,  // leeway
-                width: startElement.width,
-                height: startElement.height };
-            let rowTop = getRowTop(elements, raisedStartElement);
-            let nextRowTop = (index + 1 < startElements.length) ? getRowTop(elements, startElements[index + 1]) : Number.MAX_VALUE;
-
-            // Extract all elements and cells between the two rows.
-
-            applicationElementGroups.push({
-                 startElement: startElements[index],
-                 elements: elements.filter(element => element.y >= rowTop && element.y + element.height < nextRowTop),
-                 cells: cells.filter(cell => cell.y >= rowTop && cell.y + cell.height < nextRowTop)
-            });
+        let rows: Cell[][] = [];
+        for (let cell of cells) {
+            let row = rows.find(row => Math.abs(row[0].y - cell.y) < Tolerance);  // approximate Y co-ordinate match
+            if (row === undefined)
+                rows.push([ cell ]);  // start a new row
+            else
+                row.push(cell);  // add to an existing row
         }
 
-        // Parse the development application from each group of elements (ie. a section of the
-        // current page of the PDF document).
+        // Check that there is at least one row (even if it is just the heading row).
 
-        for (let applicationElementGroup of applicationElementGroups) {
-            let developmentApplication = parseApplicationElements(applicationElementGroup.elements, applicationElementGroup.cells, url);
-            if (developmentApplication !== undefined)
-                if (!developmentApplications.some(otherDevelopmentApplication => otherDevelopmentApplication.applicationNumber === developmentApplication.applicationNumber))  // ignore duplicates
-                    developmentApplications.push(developmentApplication);
+        if (rows.length === 0) {
+            let elementSummary = elements.map(element => `[${element.text}]`).join("");
+            console.log(`No development applications can be parsed from the current page because no rows were found (based on the grid).  Elements: ${elementSummary}`);
+            continue;
+        }
+
+        // Ensure the rows are sorted by Y co-ordinate and that the cells in each row are sorted
+        // by X co-ordinate (this is really just a safety precaution because the earlier sorting
+        // of cells in the parseCells function should have already ensured this).
+
+        let rowComparer = (a, b) => (a[0].y > b[0].y) ? 1 : ((a[0].y < b[0].y) ? -1 : 0);
+        rows.sort(rowComparer);
+
+        let rowCellComparer = (a, b) => (a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0);
+        for (let row of rows)
+            row.sort(rowCellComparer);
+
+        // Find the heading cells.
+
+        let conditionsHeadingCell = cells.find(cell => /^conditions/i.test(cell.elements.map(element => element.text).join("").replace(/\s/g, "")));
+        let referralConcurrenceHeadingCell = cells.find(cell => /^referral\/concurrence/i.test(cell.elements.map(element => element.text).join("").replace(/\s/g, "")));
+        if (conditionsHeadingCell !== undefined && referralConcurrenceHeadingCell !== undefined)
+            continue;  // ignore the pages that just have conditions information
+
+        let applicationNumberHeadingCell = cells.find(cell => /^applicationno\./i.test(cell.elements.map(element => element.text).join("").replace(/\s/g, "")));
+        let receivedDateHeadingCell = cells.find(cell => /^datereceived/i.test(cell.elements.map(element => element.text).join("").replace(/\s/g, "")));
+        let addressHeadingCell = cells.find(cell => /^addressofdevelopment/i.test(cell.elements.map(element => element.text).join("").replace(/\s/g, "")));
+        let descriptionHeadingCell = cells.find(cell => /^proposeddevelopment/i.test(cell.elements.map(element => element.text).join("").replace(/\s/g, "")));
+
+        if (applicationNumberHeadingCell === undefined) {
+            let elementSummary = elements.map(element => `[${element.text}]`).join("");
+            console.log(`No development applications can be parsed from the current page because the "Application No." column heading was not found.  Elements: ${elementSummary}`);
+            continue;
+        }
+
+        if (addressHeadingCell === undefined) {
+            let elementSummary = elements.map(element => `[${element.text}]`).join("");
+            console.log(`No development applications can be parsed from the current page because the "Address of Development" column heading was not found.  Elements: ${elementSummary}`);
+            continue;
+        }
+
+        // Try to extract a development application from each row (some rows, such as the heading
+        // row, will not actually contain a development application).
+
+        for (let row of rows) {
+            let applicationNumberCell = row.find(cell => getHorizontalOverlapPercentage(cell, applicationNumberHeadingCell) > 90);
+            let receivedDateCell = row.find(cell => getHorizontalOverlapPercentage(cell, receivedDateHeadingCell) > 90);
+            let addressCell = row.find(cell => getHorizontalOverlapPercentage(cell, addressHeadingCell) > 90);
+            let descriptionCell = row.find(cell => getHorizontalOverlapPercentage(cell, descriptionHeadingCell) > 90);
+
+            // Construct the application number.
+
+            if (applicationNumberCell === undefined)
+                continue;
+            let applicationNumber = applicationNumberCell.elements.map(element => element.text).join("").trim().toUpperCase();
+            if (!/[0-9]+\/[0-9A-Z]+\/[0-9]+/.test(applicationNumber)) { // an application number must be present, for example, "690/006/15"
+                console.log(`Ignoring "${applicationNumber}" because it is not formatted as an application number.`);
+                continue;
+            }
+            console.log(`    Found development application ${applicationNumber}.`);
+
+            // Construct the address.
+
+            if (addressCell === undefined) {
+                console.log(`Ignoring the development application "${applicationNumber}" because it has no address cell.`);
+                continue;
+            }
+
+            let address = addressCell.elements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
+
+            if (address === "") {  // an address must be present
+                console.log(`Ignoring the development application "${applicationNumber}" because the address is blank.`);
+                continue;
+            }
+
+            // Construct the description.
+
+            let description = "";
+            if (descriptionCell !== undefined)
+                description = descriptionCell.elements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
+
+            // Construct the received date.
+
+            let receivedDate = moment.invalid();
+            if (receivedDateCell !== undefined && receivedDateCell.elements.length > 0)
+                receivedDate = moment(receivedDateCell.elements.map(element => element.text).join("").replace(/\s\s+/g, " ").trim(), [ "D/MM/YY", "D/MM/YYYY" ], true);
+
+            developmentApplications.push({
+                applicationNumber: applicationNumber,
+                address: address,
+                description: ((description === "") ? "No Description Provided" : description),
+                informationUrl: url,
+                commentUrl: CommentUrl,
+                scrapeDate: moment().format("YYYY-MM-DD"),
+                receivedDate: receivedDate.isValid() ? receivedDate.format("YYYY-MM-DD") : ""
+            });        
         }
     }
 
@@ -788,7 +608,7 @@ async function main() {
     let pdfUrls: string[] = [];
     for (let element of $("div.unityHtmlArticle p a").get()) {
         let pdfUrl = new urlparser.URL(element.attribs.href, DevelopmentApplicationsUrl).href
-        if (pdfUrl.toLowerCase().includes("register") && pdfUrl.toLowerCase().includes(".pdf"))
+        if (pdfUrl.toLowerCase().includes(".pdf"))
             if (!pdfUrls.some(url => url === pdfUrl))
                 pdfUrls.push(pdfUrl);
     }
