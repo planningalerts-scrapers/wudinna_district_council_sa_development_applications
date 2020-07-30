@@ -17,7 +17,7 @@ import didYouMean, * as didyoumean from "didyoumean2";
 
 sqlite3.verbose();
 
-const DevelopmentApplicationsUrl = "https://www.wudinna.sa.gov.au/devapprovals";
+const DevelopmentApplicationsUrl = "https://www.wudinna.sa.gov.au/our-services/regulatory-services/devapprovals";
 const CommentUrl = "mailto:admin@wudinna.sa.gov.au";
 
 const Tolerance = 3;
@@ -797,7 +797,7 @@ async function main() {
         return;
     }
 
-    console.log(`Found ${pdfUrls.length} PDF file(s).  Selecting two to parse.`);
+    console.log(`Found ${pdfUrls.length} PDF file(s).`);
 
     // Select the most recent PDF.  And randomly select one other PDF (avoid processing all PDFs
     // at once because this may use too much memory, resulting in morph.io terminating the current
